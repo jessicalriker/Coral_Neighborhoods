@@ -1,0 +1,379 @@
+---
+title: "Coral_arcGIS_analysis"
+author: "Jessica Riker"
+format: html
+editor: visual
+---
+
+
+```{r}
+# setup and add packages
+#| label: setup
+#| include: false
+library(tidyverse)
+library(readxl)
+library(scales)
+```
+
+```{r}
+# inspect csvs for nearest neighbor, ripleys k, and colony attributes
+glimpse(read_csv("data/Nearest Neighbor/BA_NearSameTaxa.csv", show_col_types = FALSE))
+glimpse(read_csv("data/Nearest Neighbor/BA_neardifftaxa.csv", show_col_types = FALSE))
+glimpse(read_csv("data/Ripleys K/BA_Ripley's.csv", show_col_types = FALSE))
+glimpse(read_csv("data/Colony Attributes/BA_attributes.csv", show_col_types = FALSE))
+
+# FR4 / FR / FA4 files
+glimpse(read_csv("data/Nearest Neighbor/FR4_NearSameTaxa.csv", show_col_types = FALSE))
+glimpse(read_csv("data/Nearest Neighbor/FR4_neardifftaxa.csv", show_col_types = FALSE))
+glimpse(read_csv("data/Ripleys K/FA4_Ripley's.csv", show_col_types = FALSE))
+glimpse(read_csv("data/Colony Attributes/FR_attributes.csv", show_col_types = FALSE))
+
+# LA files
+glimpse(read_csv("data/Nearest Neighbor/LA_NearSameTaxa.csv", show_col_types = FALSE))
+glimpse(read_csv("data/Nearest Neighbor/LA_neardifftaxa.csv", show_col_types = FALSE))
+glimpse(read_csv("data/Ripleys K/LA_Ripley's.csv", show_col_types = FALSE))
+glimpse(read_csv("data/Colony Attributes/LA_attributes.csv", show_col_types = FALSE))
+```
+
+```{r}
+# 1. Same-morphotaxon nearest neighbor tables
+same_files <- tibble(
+  file = c(
+    "data/Nearest Neighbor/BA_NearSameTaxa.csv",
+    "data/Nearest Neighbor/FR4_NearSameTaxa.csv",
+    "data/Nearest Neighbor/LA_NearSameTaxa.csv"
+  ),
+  site = c("BA", "FR4", "LA")
+)
+
+same_taxa <- same_files %>%
+  mutate(data = map(file, ~ read_csv(.x, show_col_types = FALSE))) %>%
+  select(-file) %>%
+  unnest(data) %>%
+  filter(!is.na(IN_FID), !is.na(NEAR_FID), !is.na(NEAR_DIST), IN_FID != NEAR_FID) %>%
+  group_by(site, IN_FID) %>%
+  summarise(
+    closest_same_dist = min(NEAR_DIST, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# 2. Different-morphotaxon / multi-rank tables (standardizing FR4's PRED_DESC_ / PRED_DESC1)
+read_diff_reef <- function(path, reef_name) {
+  df <- read_csv(path, show_col_types = FALSE) %>%
+    mutate(site = reef_name)
+
+  if (reef_name == "FR4") {
+    df %>%
+      mutate(
+        taxa_in = as.character(PRED_DESC_),
+        taxa_near = as.character(PRED_DESC1)
+      )
+  } else {
+    df %>%
+      mutate(
+        taxa_in = as.character(CLEANEDPRE),
+        taxa_near = as.character(CLEANEDPRE_1)
+      )
+  }
+}
+
+diff_raw <- pmap_dfr(
+  list(
+    c(
+      "data/Nearest Neighbor/BA_neardifftaxa.csv",
+      "data/Nearest Neighbor/FR4_neardifftaxa.csv",
+      "data/Nearest Neighbor/LA_neardifftaxa.csv"
+    ),
+    c("BA", "FR4", "LA")
+  ),
+  read_diff_reef
+)
+
+focal_info <- diff_raw %>%
+  filter(!is.na(IN_FID), !is.na(taxa_in)) %>%
+  group_by(site, IN_FID) %>%
+  summarise(
+    morphotaxon = first(taxa_in),
+    colony_area = first(IN_AREA),
+    .groups = "drop"
+  )
+
+diff_taxa <- diff_raw %>%
+  filter(
+    !is.na(IN_FID), !is.na(NEAR_FID), !is.na(NEAR_DIST),
+    IN_FID != NEAR_FID,
+    !is.na(taxa_in), !is.na(taxa_near),
+    taxa_near != taxa_in
+  ) %>%
+  group_by(site, IN_FID) %>%
+  summarise(
+    closest_diff_dist = min(NEAR_DIST, na.rm = TRUE),
+    closest_diff_taxa = taxa_near[which.min(NEAR_DIST)],
+    .groups = "drop"
+  )
+
+colony_proximity <- focal_info %>%
+  full_join(same_taxa, by = c("site", "IN_FID")) %>%
+  full_join(diff_taxa, by = c("site", "IN_FID")) %>%
+  pivot_longer(
+    cols = c(closest_same_dist, closest_diff_dist),
+    names_to = "neighbor_type",
+    values_to = "nearest_dist"
+  ) %>%
+  mutate(
+    neighbor_type = recode(
+      neighbor_type,
+      closest_same_dist = "Same Morphotaxon",
+      closest_diff_dist = "Different Morphotaxon"
+    )
+  ) %>%
+  filter(!is.na(nearest_dist))
+
+# 3. Ripley's K tables (BA, FA4, LA)
+ripleys_k <- tibble(
+  file = c(
+    "data/Ripleys K/BA_Ripley's.csv",
+    "data/Ripleys K/FA4_Ripley's.csv",
+    "data/Ripleys K/LA_Ripley's.csv"
+  ),
+  site = c("BA", "FA4", "LA")
+) %>%
+  mutate(data = map(file, ~ read_csv(.x, show_col_types = FALSE))) %>%
+  select(-file) %>%
+  unnest(data) %>%
+  group_by(site) %>%
+  mutate(step = row_number()) %>%
+  ungroup()
+
+# 4. Colony attribute tables (standardizing FR's pred_desc_)
+attrs_all <- pmap_dfr(
+  list(
+    c(
+      "data/Colony Attributes/BA_attributes.csv",
+      "data/Colony Attributes/FR_attributes.csv",
+      "data/Colony Attributes/LA_attributes.csv"
+    ),
+    c("BA", "FR", "LA")
+  ),
+  function(path, reef_name) {
+    df <- read_csv(path, show_col_types = FALSE) %>%
+      mutate(site = reef_name)
+    taxa_col <- if ("CleanedPre" %in% names(df)) "CleanedPre" else "pred_desc_"
+    df %>%
+      mutate(morphotaxon = as.character(.data[[taxa_col]])) %>%
+      filter(!is.na(morphotaxon))
+  }
+)
+```
+
+
+```{r}
+#| label: check-fa4-vs-fr4
+ripleys_k %>% filter(site == "FA4")
+```
+
+```{r}
+#| label: fix-site-and-check-zeros
+library(tidyverse)
+
+# 1. Standardize FA4 -> FR4 in Ripley's K (and FR -> FR4 in attributes if matching)
+ripleys_k <- ripleys_k %>%
+  mutate(site = recode(site, FA4 = "FR4"))
+
+attrs_all <- attrs_all %>%
+  mutate(site = recode(site, FR = "FR4"))
+
+# 2. Check NEAR_DIST == 0 across raw same-taxa and different-taxa pairs
+same_raw <- tibble(
+  file = c(
+    "data/Nearest Neighbor/BA_NearSameTaxa.csv",
+    "data/Nearest Neighbor/FR4_NearSameTaxa.csv",
+    "data/Nearest Neighbor/LA_NearSameTaxa.csv"
+  ),
+  site = c("BA", "FR4", "LA")
+) %>%
+  mutate(data = map(file, ~ read_csv(.x, show_col_types = FALSE))) %>%
+  select(-file) %>%
+  unnest(data) %>%
+  filter(!is.na(IN_FID), !is.na(NEAR_FID), !is.na(NEAR_DIST), IN_FID != NEAR_FID) %>%
+  mutate(source = "same_taxa")
+
+diff_pairs_clean <- diff_raw %>%
+  filter(
+    !is.na(IN_FID), !is.na(NEAR_FID), !is.na(NEAR_DIST),
+    IN_FID != NEAR_FID,
+    !is.na(taxa_in), !is.na(taxa_near),
+    taxa_near != taxa_in
+  ) %>%
+  mutate(source = "diff_taxa")
+
+near_zero_summary <- bind_rows(
+  same_raw %>% select(site, source, NEAR_DIST),
+  diff_pairs_clean %>% select(site, source, NEAR_DIST)
+) %>%
+  group_by(site, source) %>%
+  summarise(
+    n_pairs = n(),
+    n_zero = sum(NEAR_DIST == 0, na.rm = TRUE),
+    pct_zero = round(100 * mean(NEAR_DIST == 0, na.rm = TRUE), 2),
+    .groups = "drop"
+  )
+
+near_zero_summary
+```
+
+```{r}
+#| label: stats-and-figures
+dir.create("outputs", showWarnings = FALSE)
+
+# Summary stats by site and neighbor_type
+prox_summary <- colony_proximity %>%
+  group_by(site, neighbor_type) %>%
+  summarise(
+    n = n(),
+    median_dist = median(nearest_dist, na.rm = TRUE),
+    iqr_dist = IQR(nearest_dist, na.rm = TRUE),
+    q25 = quantile(nearest_dist, 0.25, na.rm = TRUE),
+    q75 = quantile(nearest_dist, 0.75, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Overall Wilcoxon rank-sum test: Same vs. Different morphotaxon
+wilcox_overall <- wilcox.test(nearest_dist ~ neighbor_type, data = colony_proximity)
+
+# Within-site Wilcoxon tests
+wilcox_by_site <- colony_proximity %>%
+  group_by(site) %>%
+  summarise(
+    p_value = wilcox.test(nearest_dist ~ neighbor_type)$p.value,
+    w_stat = unname(wilcox.test(nearest_dist ~ neighbor_type)$statistic),
+    .groups = "drop"
+  )
+
+# Size vs. distance correlation (Spearman) where colony_area is available
+size_cor_by_site <- colony_proximity %>%
+  filter(!is.na(colony_area), !is.na(nearest_dist)) %>%
+  group_by(site, neighbor_type) %>%
+  summarise(
+    n = n(),
+    rho = cor(colony_area, nearest_dist, method = "spearman"),
+    p_value = cor.test(colony_area, nearest_dist, method = "spearman", exact = FALSE)$p.value,
+    .groups = "drop"
+  )
+
+# Proximity figure (two-line labels to prevent overlap)
+p_prox <- colony_proximity %>%
+  mutate(
+    neighbor_label = recode(
+      neighbor_type,
+      "Same Morphotaxon" = "Same\nMorphotaxon",
+      "Different Morphotaxon" = "Different\nMorphotaxon"
+    )
+  ) %>%
+  ggplot(aes(x = neighbor_label, y = nearest_dist, fill = neighbor_type)) +
+  geom_boxplot(outlier.alpha = 0.3, width = 0.55, show.legend = FALSE) +
+  facet_wrap(~ site, scales = "free_y") +
+  labs(
+    x = NULL,
+    y = "Nearest-Neighbor Distance",
+    title = "Closest Same- vs. Different-Morphotaxon Coral Neighbors"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(lineheight = 1.1, margin = margin(t = 6)),
+    panel.spacing = unit(1.2, "lines")
+  )
+
+ggsave("outputs/fig_same_vs_diff_taxa.png", p_prox, width = 9, height = 5, dpi = 300)
+
+# Ripley's K figure across sites
+p_ripley <- ggplot(ripleys_k, aes(x = step)) +
+  geom_ribbon(aes(ymin = LwConfEnv, ymax = HiConfEnv), alpha = 0.25, fill = "grey50") +
+  geom_line(aes(y = ExpectedK, linetype = "Expected K"), linewidth = 0.8) +
+  geom_line(aes(y = ObservedK, color = site), linewidth = 1) +
+  facet_wrap(~ site, scales = "free_y") +
+  labs(
+    x = "Distance Step",
+    y = "K Value",
+    color = "Site",
+    linetype = NULL,
+    title = "Observed vs. Expected Ripley's K and Confidence Envelope"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.spacing = unit(1.2, "lines"))
+
+ggsave("outputs/fig_ripleys_k.png", p_ripley, width = 9, height = 5, dpi = 300)
+
+list(
+  prox_summary = prox_summary,
+  wilcox_overall = wilcox_overall,
+  wilcox_by_site = wilcox_by_site,
+  size_cor_by_site = size_cor_by_site
+)
+```
+Results:
+Overall & Within-Site Proximity (wilcox_overall & wilcox_by_site): Nearest-neighbor distances differ significantly between Same Morphotaxon and Different Morphotaxon overall ($W = 8,107,456$, $p < 2.2 \times 10^{-16}$) and within every reef (BA: $p = 1.21 \times 10^{-153}$; FR4: $p = 6.54 \times 10^{-32}$; LA: $p = 2.42 \times 10^{-7}$).Medians (prox_summary): At BA, the median distance to the closest Different Morphotaxon neighbor is 0.00 (touching/overlapping), whereas for Same Morphotaxon it is 0.0277 (with a small iqr_dist print quirk in the pasted columns—check prox_summary$iqr_dist directly if needed). At FR4 and LA, medians are 0.00 for both groups, meaning the distributions differ in shape/spread and zero vs. non-zero proportions rather than median alone.Colony Size vs. Nearest-Neighbor Distance (size_cor_by_site):Same Morphotaxon: Positive Spearman correlations ($\rho \approx 0.24$ to $0.32$, all $p < 10^{-25}$) across all three reefs (BA: $\rho = 0.257$; FR4: $\rho = 0.241$; LA: $\rho = 0.320$)—larger colonies tend to be farther from their closest same-morphotaxon neighbor.Different Morphotaxon: Weak negative correlations at BA ($\rho = -0.173$, $p = 1.89 \times 10^{-14}$) and FR4 ($\rho = -0.109$, $p = 8.75 \times 10^{-6}$), and no significant correlation at LA ($\rho = -0.032$, $p = 0.342$).
+
+```{r}
+#| label: tbl-proximity-summary
+prox_summary %>%
+  mutate(
+    across(c(median_dist, iqr_dist, q25, q75), ~ round(.x, 4))
+  ) %>%
+  knitr::kable(
+    col.names = c("Site", "Neighbor Type", "n", "Median", "IQR", "Q25", "Q75"),
+    caption = "Closest nearest-neighbor distance summary by reef site and morphotaxon relationship."
+  )
+```
+
+```{r}
+#| label: fig-same-vs-diff-taxa
+#| fig-cap: "Distribution of closest nearest-neighbor distances ([units]) to colonies of the same versus different morphotaxon across reef sites (BA, FR4, and LA). A distance of 0 indicates touching or overlapping coral polygon boundaries; boxes show the median and interquartile range (Q25–Q75), with whiskers extending up to 1.5× IQR and points showing outliers."
+p_prox <- colony_proximity %>%
+  mutate(
+    neighbor_label = recode(
+      neighbor_type,
+      "Same Morphotaxon" = "Same\nMorphotaxon",
+      "Different Morphotaxon" = "Different\nMorphotaxon"
+    )
+  ) %>%
+  ggplot(aes(x = neighbor_label, y = nearest_dist, fill = neighbor_type)) +
+  geom_boxplot(outlier.alpha = 0.3, width = 0.55, show.legend = FALSE) +
+  facet_wrap(~ site, scales = "free_y") +
+  labs(
+    x = NULL,
+    y = "Nearest-Neighbor Distance ([units])",
+    title = "Closest Same- vs. Different-Morphotaxon Coral Neighbors"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(lineheight = 1.1, margin = margin(t = 6)),
+    panel.spacing = unit(1.2, "lines")
+  )
+
+ggsave("outputs/fig_same_vs_diff_taxa.png", p_prox, width = 9, height = 5, dpi = 300)
+p_prox
+```
+```{r}
+#| label: fig-ripleys-k
+#| fig-cap: "Multi-distance spatial clustering (Ripley's K) across distance steps for each reef site. The shaded grey band shows the simulation confidence envelope (LwConfEnv to HiConfEnv) expected under complete spatial randomness; when ObservedK rises above the upper confidence envelope, colonies are more spatially clustered than random at that scale, whereas values inside or below the envelope indicate random or dispersed spacing."
+p_ripley <- ggplot(ripleys_k, aes(x = step)) +
+  geom_ribbon(aes(ymin = LwConfEnv, ymax = HiConfEnv), alpha = 0.25, fill = "grey50") +
+  geom_line(aes(y = ExpectedK, linetype = "Expected K"), linewidth = 0.8) +
+  geom_line(aes(y = ObservedK, color = site), linewidth = 1) +
+  facet_wrap(~ site, scales = "free_y") +
+  labs(
+    x = "Distance Step",
+    y = "K Value",
+    color = "Site",
+    linetype = NULL,
+    title = "Observed vs. Expected Ripley's K and Confidence Envelope"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.spacing = unit(1.2, "lines"))
+
+ggsave("outputs/fig_ripleys_k.png", p_ripley, width = 9, height = 5, dpi = 300)
+p_ripley
+```
+
+
