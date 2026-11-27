@@ -376,4 +376,26 @@ ggsave("outputs/fig_ripleys_k.png", p_ripley, width = 9, height = 5, dpi = 300)
 p_ripley
 ```
 
+```{r}
+library(gridExtra)
+library(grid)
+
+# Format and round your prox_summary table cleanly
+tbl_clean <- prox_summary %>%
+  mutate(across(c(median_dist, iqr_dist, q25, q75), ~ round(.x, 4))) %>%
+  rename(
+    Site = site,
+    `Neighbor Type` = neighbor_type,
+    n = n,
+    `Median (m)` = median_dist,
+    `IQR (m)` = iqr_dist,
+    `Q25 (m)` = q25,
+    `Q75 (m)` = q75
+  )
+
+# Save as a 300-DPI PNG in your outputs folder
+png("outputs/tbl_proximity_summary.png", width = 8, height = 2.6, units = "in", res = 300)
+grid.table(tbl_clean, rows = NULL)
+dev.off()
+```
 
