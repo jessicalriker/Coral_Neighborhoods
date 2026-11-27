@@ -342,7 +342,7 @@ p_prox <- colony_proximity %>%
   facet_wrap(~ site, scales = "free_y") +
   labs(
     x = NULL,
-    y = "Nearest-Neighbor Distance ([units])",
+    y = "Nearest-Neighbor Distance",
     title = "Closest Same- vs. Different-Morphotaxon Coral Neighbors"
   ) +
   theme_minimal(base_size = 12) +
